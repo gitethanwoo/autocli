@@ -61,10 +61,15 @@ implementation-detail tables are not.
 
 - Single run, single product, scored by the same party that ran it.
 - The pitch named leads/prayer requests, so those entities were given.
-- FaithBase itself was substantially built with AI agents — the "prediction"
-  may partly be two instances of the same model prior converging, not
-  independent validation of product logic. (For the direction-finding use
-  case this doesn't matter much: the prior IS the point.)
+- An earlier draft worried the hits might be "two instances of the same model
+  prior converging" since FaithBase's implementation was AI-assisted. The
+  founder corrected this: product decisions — which features and capabilities
+  to build — were human-led. The roadmap-level hits (evals, rate limiting,
+  cost ledgers, rollups) therefore reflect convergence with independent human
+  product judgment, which strengthens the result. AI involvement plausibly
+  remains at the implementation layer (how a decided feature became specific
+  tables), so exact table-shape matches are weaker evidence than
+  capability-level matches.
 
 ## Product implication for autocli
 
