@@ -112,6 +112,7 @@ const listArgs = {
   eqValues: v.optional(v.array(v.any())),
   since: v.optional(v.number()),
   until: v.optional(v.number()),
+  rangeField: v.optional(v.string()),
   order: v.optional(v.union(v.literal("asc"), v.literal("desc"))),
   limit: v.optional(v.number()),
   cursor: v.optional(v.string()),
@@ -126,6 +127,7 @@ interface ListArgsShape {
   eqValues?: Value[];
   since?: number;
   until?: number;
+  rangeField?: string;
   order?: "asc" | "desc";
   limit?: number;
   cursor?: string;
@@ -188,8 +190,12 @@ function buildIndexedQuery(ctx: Ctx, a: ListArgsShape): IndexedQuery {
       const f = eqFields[i];
       if (f !== undefined) b = b.eq(f, eqValues[i] ?? null);
     }
-    if (a.since !== undefined) b = b.gte("_creationTime", a.since);
-    if (a.until !== undefined) b = b.lte("_creationTime", a.until);
+    // Convex requires bounds on the NEXT index field after the eq chain; the
+    // CLI's planner passes which field that is (implicit trailing
+    // _creationTime, or a declared time field like createdAt).
+    const rangeField = a.rangeField ?? "_creationTime";
+    if (a.since !== undefined) b = b.gte(rangeField, a.since);
+    if (a.until !== undefined) b = b.lte(rangeField, a.until);
     return b;
   });
 }

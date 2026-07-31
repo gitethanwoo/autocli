@@ -68,13 +68,14 @@ export function renderList(input: ListRenderInput): string {
   const columns = [...table.identityFields, "_creationTime"];
   parts.push("");
 
-  // Token budget: drop rows from the bottom until the table fits.
+  // Token budget: drop rows from the bottom until the table fits, but always
+  // keep at least 3 rows — an empty table under a "N rows" header is a lie.
   let rows = page;
   let trimmed = 0;
   let body = renderRows(rows, columns);
   const budget = spec.defaults.outputTokenBudget;
   while (rows.length > 3 && estimateTokens(body) > budget) {
-    rows = rows.slice(0, rows.length - 5);
+    rows = rows.slice(0, Math.max(3, rows.length - 5));
     trimmed = page.length - rows.length;
     body = renderRows(rows, columns);
   }
@@ -124,7 +125,7 @@ export function renderDetail(input: DetailRenderInput): string {
 
   const blobs = new Set(table.blobFields);
   const keys = Object.keys(doc).filter((k) => k !== "_id");
-  const pad = Math.min(28, Math.max(...keys.map((k) => k.length)) + 1);
+  const pad = Math.min(34, Math.max(...keys.map((k) => k.length)) + 1);
   for (const k of keys) {
     const v = doc[k];
     let rendered: string;
@@ -142,10 +143,12 @@ export function renderDetail(input: DetailRenderInput): string {
     parts.push(`${k.padEnd(pad)} ${rendered}${labelSuffix}`);
   }
 
+  const nonZero = related.filter((r) => r.count > 0);
+  const zero = related.filter((r) => r.count === 0);
   if (related.length > 0) {
     parts.push("");
     parts.push("Linked records:");
-    for (const r of related) {
+    for (const r of nonZero) {
       const relSpec = spec.tables[r.table];
       const flagName = relSpec?.filters.find((f) => f.field === r.field)?.flag ?? kebab(r.field);
       const countLabel = r.capped ? `${r.count}+` : String(r.count);
@@ -153,6 +156,9 @@ export function renderDetail(input: DetailRenderInput): string {
         `  ${r.table.padEnd(24)} ${countLabel.padStart(4)}   autocli ${r.table} --${flagName} ${String(doc["_id"] ?? "")}`,
       );
     }
+  }
+  if (zero.length > 0) {
+    parts.push(`  (none: ${zero.map((r) => r.table).join(", ")})`);
   }
   return parts.join("\n");
 }

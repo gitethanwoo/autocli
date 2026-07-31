@@ -1,3 +1,4 @@
+import { describeCombos } from "./planner.js";
 import type { AutocliSpec, TableSpec } from "./types.js";
 
 export function renderTopHelp(spec: AutocliSpec): string {
@@ -25,6 +26,7 @@ export function renderTopHelp(spec: AutocliSpec): string {
     const extras: string[] = [];
     if (t.search.length > 0) extras.push("search");
     const flags = t.filters.slice(0, 3).map((f) => `--${f.flag}`);
+    if (t.filters.length > 3) flags.push(`(+${t.filters.length - 3} more)`);
     if (flags.length > 0) extras.push(flags.join(" "));
     parts.push(`  ${name.padEnd(32)} ${extras.join("  ")}`);
   }
@@ -78,13 +80,11 @@ export function renderTableHelp(spec: AutocliSpec, t: TableSpec): string {
       if (f.enumValues) type = f.enumValues.slice(0, 6).join("|");
       parts.push(`  --${f.flag.padEnd(28)} ${type}`);
     }
-    const combos = t.indexes
-      .map((i) => i.fields.filter((f) => f !== "_creationTime"))
-      .filter((f) => f.length > 1);
+    const combos = describeCombos(t);
     if (combos.length > 0) {
       parts.push("");
-      parts.push("Valid filter combinations (index prefixes):");
-      for (const c of combos.slice(0, 8)) parts.push(`  ${c.join(" + ")}`);
+      parts.push("Valid filter combinations (index prefixes; any prefix of one works):");
+      for (const c of combos) parts.push(`  ${c}`);
     }
   }
 

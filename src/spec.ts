@@ -18,16 +18,25 @@ export const DEFAULTS: SpecDefaults = {
   countCap: 1000,
 };
 
-/** Always redacted: values that grant access. */
-const SECRET_RE =
-  /(secret|token|password|passwd|apikey|api_key|accesskey|access_key|privatekey|private_key|credential|signature|ssn)/i;
+/** Always redacted: values that grant access. Substring match for hard words… */
+const SECRET_RE = /(secret|password|passwd|apikey|api_key|credential|signature|ssn)/i;
+/**
+ * …suffix match for the ambiguous ones: `accessToken`/`webhookKey` are
+ * credentials, but `tokensPrompt`/`rateLimitTokens`/`promptTokens` are usage
+ * counters and must stay visible.
+ */
+const SECRET_SUFFIX_RE = /(token|key|secret|password)$/i;
 /** Redacted by default, flagged for the finishing interview: PII. */
-const PII_RE = /(email|phone|address|firstname|lastname|fullname|birthdate|dob)\b|^(email|phone|name)$/i;
+const PII_RE = /(email|phone|address|firstname|first_name|lastname|last_name|fullname|full_name|birthdate|dob)/i;
+/** Epoch-ms timestamp fields: served by --since/--until, never by eq flags. */
+const TIME_FIELD_RE = /(At|Time|Timestamp|Date)$/;
 /** Long-text fields elided in list views, truncated in detail views. */
 const BLOB_NAME_RE =
   /(prompt|text|content|body|html|markdown|transcript|message|description|summary|notes|raw|payload|snippet|chunk)/i;
 /** Fields preferred as a human label for a row. */
-const LABEL_CANDIDATES = ["name", "title", "slug", "label", "displayName", "key"];
+const LABEL_CANDIDATES = ["name", "title", "slug", "label", "displayName"];
+/** Fallback label: short descriptive strings like firstMessagePreview. */
+const LABEL_FALLBACK_RE = /(preview|subject|title)$/i;
 /** Fields that make good list columns, in priority order. */
 const IDENTITY_CANDIDATES = [
   ...LABEL_CANDIDATES,
@@ -41,6 +50,8 @@ const IDENTITY_CANDIDATES = [
   "createdAt",
   "updatedAt",
 ];
+/** Suffix-matched identity candidates: jobType, syncState, reviewStatus, … */
+const IDENTITY_SUFFIX_RE = /(type|kind|status|state)$/i;
 
 export interface GenerateSpecOptions {
   projectName: string;
@@ -64,8 +75,15 @@ export function generateSpec(ir: SchemaIR, opts: GenerateSpecOptions): AutocliSp
 
 function generateTableSpec(t: TableIR, ir: SchemaIR): TableSpec {
   const redactedFields = t.fields
-    .filter((f) => SECRET_RE.test(f.name) || PII_RE.test(f.name))
+    .filter((f) => SECRET_RE.test(f.name) || SECRET_SUFFIX_RE.test(f.name) || PII_RE.test(f.name))
     .map((f) => f.name);
+  // "name" is a label on entity tables (organizations, agents) but PII on
+  // person tables. Signal: a table that also stores email/phone is about
+  // people, so its "name" is someone's name.
+  const piiCount = t.fields.filter((f) => /(email|phone)/i.test(f.name)).length;
+  if (piiCount >= 2 && t.fields.some((f) => f.name === "name" && f.kind === "string")) {
+    redactedFields.push("name");
+  }
   const redacted = new Set(redactedFields);
 
   const blobFields = t.fields
@@ -82,9 +100,13 @@ function generateTableSpec(t: TableIR, ir: SchemaIR): TableSpec {
   const blobs = new Set(blobFields);
 
   const identityFields = pickIdentityFields(t.fields, redacted, blobs);
-  const labelField = LABEL_CANDIDATES.find(
-    (c) => !redacted.has(c) && t.fields.some((f) => f.name === c && f.kind === "string"),
-  );
+  const labelField =
+    LABEL_CANDIDATES.find(
+      (c) => !redacted.has(c) && t.fields.some((f) => f.name === c && f.kind === "string"),
+    ) ??
+    t.fields.find(
+      (f) => f.kind === "string" && !redacted.has(f.name) && LABEL_FALLBACK_RE.test(f.name),
+    )?.name;
 
   const filters = deriveFilters(t, redacted);
   const belongsTo = t.fields
@@ -107,6 +129,9 @@ function generateTableSpec(t: TableIR, ir: SchemaIR): TableSpec {
     belongsTo,
     hasMany: deriveHasMany(t.name, ir),
     search,
+    timeFields: t.fields
+      .filter((f) => f.kind === "number" && TIME_FIELD_RE.test(f.name))
+      .map((f) => f.name),
     ...(labelField ? { labelField } : {}),
   };
 }
@@ -127,6 +152,15 @@ function pickIdentityFields(
     const f = byName.get(c);
     if (f && usable(f) && !picked.includes(c)) picked.push(c);
     if (picked.length >= 4) break;
+  }
+  // Suffix-matched candidates (jobType, reviewStatus, …) before generic backfill.
+  if (picked.length < 4) {
+    for (const f of fields) {
+      if (usable(f) && IDENTITY_SUFFIX_RE.test(f.name) && !picked.includes(f.name)) {
+        picked.push(f.name);
+        if (picked.length >= 4) break;
+      }
+    }
   }
   // Backfill with remaining scalar fields (enums and short strings first)
   if (picked.length < 4) {
@@ -172,6 +206,8 @@ function deriveFilters(t: TableIR, redacted: Set<string>): FilterSpec[] {
     const f = byName.get(fieldName);
     if (!f) continue;
     if (f.kind === "array" || f.kind === "object" || f.kind === "record") continue;
+    // Timestamps get --since/--until, not a useless millisecond eq flag.
+    if (f.kind === "number" && TIME_FIELD_RE.test(f.name)) continue;
     filters.push({
       flag: kebab(fieldName),
       field: fieldName,

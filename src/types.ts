@@ -146,6 +146,12 @@ export interface TableSpec {
   belongsTo: { field: string; table: string }[];
   hasMany: RelationSpec[];
   search: SearchSpec[];
+  /**
+   * number fields holding epoch-ms timestamps (createdAt, completedAt, …).
+   * They get --since/--until treatment instead of equality filters, and the
+   * planner may range on them when they appear as the next index field.
+   */
+  timeFields: string[];
   /** field used to label this table's rows when referenced from elsewhere */
   labelField?: string;
 }

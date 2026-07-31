@@ -4,7 +4,7 @@ import { convexRun, ConvexRunError } from "./convex-run.js";
 import { renderCount, renderDetail, renderList, renderWhois } from "./format.js";
 import { renderGuide, renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
 import { introspectConvexProject, IntrospectError } from "./introspect.js";
-import { planQuery } from "./planner.js";
+import { describeCombos, planQuery } from "./planner.js";
 import { generateConvexModule } from "./gen-convex.js";
 import { generateSpec } from "./spec.js";
 import type { AutocliSpec, FilterSpec, TableSpec } from "./types.js";
@@ -46,6 +46,50 @@ function parseArgs(argv: string[]): Parsed {
 function fail(message: string): never {
   console.error(`✗ ${message}`);
   process.exit(1);
+}
+
+/** Flags accepted by every command. */
+const GLOBAL_FLAGS = ["help", "json", "prod"];
+const LIST_FLAGS = ["limit", "since", "until", "order", "cursor", "fields", "full"];
+
+/**
+ * A silently ignored flag returns unfiltered data that looks filtered — the
+ * worst failure mode for an agent-first tool. Every flag must be known.
+ */
+export function validateFlags(
+  flags: Map<string, string | true>,
+  allowed: string[],
+  context: string,
+): void {
+  const allow = new Set([...GLOBAL_FLAGS, ...allowed]);
+  for (const name of flags.keys()) {
+    if (allow.has(name)) continue;
+    const guess = [...allow].filter(
+      (a) => a.includes(name) || name.includes(a) || levenshteinLte2(a, name),
+    );
+    fail(
+      `Unknown flag --${name} for ${context}.${guess.length > 0 ? ` Did you mean: ${guess.map((g) => `--${g}`).join(", ")}?` : ""}\nValid flags: ${[...allow].map((a) => `--${a}`).join(" ")}`,
+    );
+  }
+}
+
+function levenshteinLte2(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 2) return false;
+  const prev: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0] ?? 0;
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j] ?? 0;
+      prev[j] = Math.min(
+        (prev[j] ?? 0) + 1,
+        (prev[j - 1] ?? 0) + 1,
+        diag + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      diag = tmp;
+    }
+  }
+  return (prev[b.length] ?? 3) <= 2;
 }
 
 function findProjectRoot(start: string): { root: string; specPath: string } | null {
@@ -130,6 +174,7 @@ interface QueryArgs {
   since?: number;
   until?: number;
   index?: string;
+  rangeField?: string;
 }
 
 function buildQueryArgs(table: TableSpec, flags: Map<string, string | true>): QueryArgs {
@@ -141,14 +186,15 @@ function buildQueryArgs(table: TableSpec, flags: Map<string, string | true>): Qu
     providedFilters.push({ f, value: coerceFilterValue(f, raw) });
   }
 
+  const wantsTimeRange = flags.get("since") !== undefined || flags.get("until") !== undefined;
   const plan = planQuery(
     table,
     providedFilters.map((p) => p.f.field),
+    { timeRange: wantsTimeRange },
   );
   if (!plan.ok) {
-    const combos = plan.validCombos
-      .filter((c) => c.length > 0)
-      .map((c) => `  ${c.map((x) => `--${table.filters.find((f) => f.field === x)?.flag ?? x}`).join(" ")}`)
+    const combos = describeCombos(table)
+      .map((c) => `  ${c}`)
       .join("\n");
     fail(`${plan.message}\nValid filter combinations for ${table.name}:\n${combos || "  (none — this table has no indexed filters)"}`);
   }
@@ -161,6 +207,7 @@ function buildQueryArgs(table: TableSpec, flags: Map<string, string | true>): Qu
     activeFilters: providedFilters.map((p) => `${p.f.field}=${String(p.value)}`),
   };
   if (plan.index !== undefined) args.index = plan.index;
+  if (wantsTimeRange && plan.rangeField !== undefined) args.rangeField = plan.rangeField;
 
   const now = Date.now();
   const since = flags.get("since");
@@ -191,6 +238,19 @@ function getLimit(flags: Map<string, string | true>, spec: AutocliSpec): number 
   return n;
 }
 
+/**
+ * Deployed functions echo the schema hash they were generated from; if it
+ * differs from the local spec, one side is stale.
+ */
+function warnOnDrift(spec: AutocliSpec, result: { schemaHash?: string }): void {
+  if (result.schemaHash !== undefined && result.schemaHash !== spec.schemaHash) {
+    console.error(
+      "⚠ schema drift: deployed autocli functions were generated from a different schema than autocli.spec.json. Run `autocli regen` and redeploy.",
+    );
+  }
+  delete result.schemaHash;
+}
+
 function runList(spec: AutocliSpec, table: TableSpec, flags: Map<string, string | true>, opts: CommonOpts): void {
   const q = buildQueryArgs(table, flags);
   const payload: Record<string, unknown> = {
@@ -201,6 +261,7 @@ function runList(spec: AutocliSpec, table: TableSpec, flags: Map<string, string 
   if (q.index !== undefined) payload["index"] = q.index;
   if (q.since !== undefined) payload["since"] = q.since;
   if (q.until !== undefined) payload["until"] = q.until;
+  if (q.rangeField !== undefined) payload["rangeField"] = q.rangeField;
   const limit = getLimit(flags, spec);
   if (limit !== undefined) payload["limit"] = limit;
   const order = flags.get("order");
@@ -215,7 +276,9 @@ function runList(spec: AutocliSpec, table: TableSpec, flags: Map<string, string 
     page: Record<string, unknown>[];
     isDone: boolean;
     cursor: string | null;
+    schemaHash?: string;
   };
+  warnOnDrift(spec, result);
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -238,7 +301,9 @@ function runDetail(spec: AutocliSpec, table: TableSpec, id: string, flags: Map<s
     labels?: Record<string, string | null>;
     related?: { table: string; field: string; count: number; capped: boolean }[];
     error: string | null;
+    schemaHash?: string;
   };
+  warnOnDrift(spec, result);
   if (result.error) fail(`${result.error}\nHint: autocli whois ${id} resolves an id of unknown table.`);
   if (!result.doc) {
     fail(`No ${table.name} document with id ${id}. It may have been deleted.\nHint: autocli ${table.name} lists current rows.`);
@@ -270,6 +335,7 @@ function runCount(spec: AutocliSpec, table: TableSpec, flags: Map<string, string
   if (q.index !== undefined) payload["index"] = q.index;
   if (q.since !== undefined) payload["since"] = q.since;
   if (q.until !== undefined) payload["until"] = q.until;
+  if (q.rangeField !== undefined) payload["rangeField"] = q.rangeField;
   let result: unknown;
   if (typeof by === "string") {
     payload["by"] = by;
@@ -316,7 +382,9 @@ function runSearch(spec: AutocliSpec, table: TableSpec, query: string, flags: Ma
   if (limit !== undefined) payload["limit"] = limit;
   const result = convexRun("search", payload, { projectDir: opts.root, prod: opts.prod }) as {
     results: Record<string, unknown>[];
+    schemaHash?: string;
   };
+  warnOnDrift(spec, result);
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -461,10 +529,12 @@ export function main(argv: string[]): void {
   const opts: CommonOpts = { root, prod, json };
 
   if (cmd === "guide") {
+    validateFlags(flags, [], "guide");
     console.log(renderGuide(spec));
     return;
   }
   if (cmd === "tables") {
+    validateFlags(flags, [], "tables");
     console.log(renderTablesOverview(spec));
     return;
   }
@@ -473,6 +543,7 @@ export function main(argv: string[]): void {
     return;
   }
   if (cmd === "whois") {
+    validateFlags(flags, [], "whois");
     const id = positional[1];
     if (!id) fail("Usage: autocli whois <id>");
     const result = convexRun("whois", { id }, { projectDir: root, prod }) as {
@@ -481,7 +552,11 @@ export function main(argv: string[]): void {
     };
     if (json) {
       console.log(JSON.stringify(result, null, 2));
+      if (!result.table) process.exit(1);
       return;
+    }
+    if (!result.table) {
+      fail(`${id} does not match any table in this deployment. Ids look like "jd7f8..." — check for truncation.`);
     }
     console.log(renderWhois(spec, id, result));
     if (result.table && result.doc) {
@@ -507,16 +582,25 @@ export function main(argv: string[]): void {
   }
 
   const sub = positional[1];
+  const filterFlags = table.filters.flatMap((f) => [f.flag, f.field]);
   try {
     if (sub === "count") {
+      validateFlags(flags, [...LIST_FLAGS, ...filterFlags, "by"], `${table.name} count`);
       runCount(spec, table, flags, opts);
     } else if (sub === "search") {
       const query = positional[2];
       if (!query) fail(`Usage: autocli ${table.name} search "query"`);
+      const searchFlags = (table.search[0]?.filterFields ?? []).flatMap((field) => {
+        const f = table.filters.find((x) => x.field === field);
+        return f ? [f.flag, f.field] : [field];
+      });
+      validateFlags(flags, ["limit", ...searchFlags], `${table.name} search`);
       runSearch(spec, table, query, flags, opts);
     } else if (sub !== undefined) {
+      validateFlags(flags, ["full", "fields"], `${table.name} detail`);
       runDetail(spec, table, sub, flags, opts);
     } else {
+      validateFlags(flags, [...LIST_FLAGS, ...filterFlags], table.name);
       runList(spec, table, flags, opts);
     }
   } catch (e) {
@@ -524,5 +608,3 @@ export function main(argv: string[]): void {
     throw e;
   }
 }
-
-main(process.argv.slice(2));
