@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
 import { parseRawSchema } from "./introspect.js";
-import { generateSpec } from "./spec.js";
+import { generateSpec, normalizeStepCmd } from "./spec.js";
 import type { TableSpec } from "./types.js";
 
 import { EMPTY_IR, hasFixture, loadFixtureIR } from "./fixture-helper.js";
@@ -32,11 +32,13 @@ describe.skipIf(!hasFixture)("renderTopHelp", () => {
     for (const wf of spec.workflows) {
       expect(top).toContain(`${wf.title}:`);
       wf.steps.forEach((s, i) => {
-        expect(top).toContain(`${i + 1}. ${s.cmd}`);
+        expect(top).toContain(`${i + 1}. ${normalizeStepCmd(s.cmd, "./faithbase")}`);
         expect(top).toContain(s.note);
       });
     }
-    expect(top).toContain("1. autocli organizations");
+    // Seed steps are stored with the canonical `autocli` prefix but render
+    // with the project's CLI name.
+    expect(top).toContain("1. ./faithbase organizations");
   });
 
   it("marks searchable tables and shows their first filter flags", () => {
@@ -48,8 +50,8 @@ describe.skipIf(!hasFixture)("renderTopHelp", () => {
 
   it("names the project and documents the command surface", () => {
     expect(top).toContain("data exploration CLI for faithbase");
-    expect(top).toContain("autocli whois <id>");
-    expect(top).toContain("autocli <table> count [--by f]");
+    expect(top).toContain("./faithbase whois <id>");
+    expect(top).toContain("./faithbase <table> count [--by f]");
   });
 });
 
@@ -82,7 +84,7 @@ describe.skipIf(!hasFixture)("renderTableHelp", () => {
 
     const orgHelp = renderTableHelp(spec, specTable("organizations"));
     expect(orgHelp).toContain("Has many:");
-    expect(orgHelp).toContain("autocli users --organization-id <organizations id>");
+    expect(orgHelp).toContain("./faithbase users --organization-id <organizations id>");
   });
 
   it("renders the hint block when a table has one", () => {

@@ -1,12 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { convexRun, ConvexRunError } from "./convex-run.js";
 import { renderCount, renderDetail, renderList, renderWhois } from "./format.js";
 import { renderGuide, renderSkill, renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
 import { introspectConvexProject, IntrospectError } from "./introspect.js";
 import { describeCombos, planQuery } from "./planner.js";
 import { generateConvexModule } from "./gen-convex.js";
-import { generateSpec } from "./spec.js";
+import { cliRef, generateSpec } from "./spec.js";
 import type { AutocliSpec, FilterSpec, TableSpec } from "./types.js";
 
 const SPEC_FILE = "autocli.spec.json";
@@ -304,9 +305,9 @@ function runDetail(spec: AutocliSpec, table: TableSpec, id: string, flags: Map<s
     schemaHash?: string;
   };
   warnOnDrift(spec, result);
-  if (result.error) fail(`${result.error}\nHint: autocli whois ${id} resolves an id of unknown table.`);
+  if (result.error) fail(`${result.error}\nHint: ${cliRef(spec)} whois ${id} resolves an id of unknown table.`);
   if (!result.doc) {
-    fail(`No ${table.name} document with id ${id}. It may have been deleted.\nHint: autocli ${table.name} lists current rows.`);
+    fail(`No ${table.name} document with id ${id}. It may have been deleted.\nHint: ${cliRef(spec)} ${table.name} lists current rows.`);
   }
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
@@ -405,25 +406,36 @@ function runSearch(spec: AutocliSpec, table: TableSpec, query: string, flags: Ma
 // init / regen
 // ---------------------------------------------------------------------------
 
-const INTERVIEW_QUESTIONS = `## Finishing interview — 5 questions for a human (or an agent who knows the product)
+function interviewQuestions(spec: AutocliSpec): string {
+  const cli = cliRef(spec);
+  return `## Finishing interview — 6 questions for a human (or an agent who knows the product)
 
 The generated spec is a correct skeleton. These answers make it great. Record
-them by editing ${SPEC_FILE} (fields: workflows, tables.<name>.hint,
+them by editing ${SPEC_FILE} (fields: cliName, workflows, tables.<name>.hint,
 tables.<name>.description, tables.<name>.redactedFields), then re-run
-\`autocli regen\` any time — schema changes merge in without clobbering your edits.
+\`${cli} regen\` any time — schema changes merge in without clobbering your edits.
 
-1. Sensitive data: these fields were auto-redacted by name heuristics — review
+1. Name: this CLI currently answers to \`${cli}\`. Is that the name people and
+   agents will recognize as "${spec.projectName}'s data tool"? Edit "cliName"
+   in the spec and re-run regen to rename (the old shim is cleaned up).
+   Workflow step commands may keep the canonical \`autocli\` prefix — it
+   renders as the current name.
+2. Sensitive data: these fields were auto-redacted by name heuristics — review
    the "redactedFields" of each table. Anything to un-redact? Anything missed?
-2. Workflows: what are the top 2-3 recurring questions you (or agents) ask of
+3. Workflows: what are the top 2-3 recurring questions you (or agents) ask of
    this data? ("why is customer X broken", "what did agent Y retrieve", ...)
    Replace the generated seed workflow with numbered real ones.
-3. Cost/danger hints: which tables are huge, expensive, or misleading without
+4. Cost/danger hints: which tables are huge, expensive, or misleading without
    context? Add a "hint" to those tables.
-4. Descriptions: skim the generated one-liners in \`autocli tables\` — fix any
+5. Descriptions: skim the generated one-liners in \`${cli} tables\` — fix any
    that describe the schema but miss the intent.
-5. Prod policy: is read-only prod access via --prod acceptable, or should this
+6. Prod policy: is read-only prod access via --prod acceptable, or should this
    CLI stay dev-only? (If dev-only, say so in your agent instructions.)
+
+Spec edits to redactedFields/identityFields only take effect server-side after
+\`${cli} regen\` and a deploy (\`npx convex dev\` picks it up automatically).
 `;
+}
 
 function detectProjectName(root: string): string {
   try {
@@ -438,6 +450,7 @@ function detectProjectName(root: string): string {
 /** Preserve human-editable enrichments across regeneration. */
 function mergeSpecs(old: AutocliSpec, fresh: AutocliSpec): AutocliSpec {
   const merged: AutocliSpec = { ...fresh };
+  if (old.cliName) merged.cliName = old.cliName;
   const keptWorkflows = old.workflows.filter((w) => w.todo !== true);
   if (keptWorkflows.length > 0) merged.workflows = keptWorkflows;
   for (const [name, freshTable] of Object.entries(fresh.tables)) {
@@ -458,6 +471,36 @@ function mergeSpecs(old: AutocliSpec, fresh: AutocliSpec): AutocliSpec {
   return merged;
 }
 
+const SHIM_MARKER = "Generated by autocli";
+
+/**
+ * Root-level executable named after the project, so every rendered command
+ * (`./fb jobs --status failed`) is copy-pasteable verbatim. Resolves the
+ * installed autocli package first, falling back to the absolute path of the
+ * generator that wrote it (regen refreshes the path).
+ */
+function shimSource(): string {
+  const selfPath = fileURLToPath(import.meta.url);
+  return `#!/usr/bin/env node
+// ${SHIM_MARKER} — this project's data CLI. Rename via "cliName" in ${SPEC_FILE} + regen.
+import("autocli/cli")
+  .catch(() => import(${JSON.stringify(selfPath)}))
+  .then((m) => m.main(process.argv.slice(2)));
+`;
+}
+
+/** Remove a previous name's shim + skill dir (only artifacts we created). */
+function cleanupRenamedArtifacts(root: string, oldName: string): void {
+  const shim = join(root, oldName);
+  try {
+    if (existsSync(shim) && readFileSync(shim, "utf8").includes(SHIM_MARKER)) rmSync(shim);
+  } catch {
+    // never let cleanup block regen
+  }
+  const skillDir = join(root, ".claude", "skills", oldName);
+  if (existsSync(join(skillDir, "SKILL.md"))) rmSync(skillDir, { recursive: true, force: true });
+}
+
 function runInit(regen: boolean): void {
   const root = process.cwd();
   if (!existsSync(join(root, "convex"))) {
@@ -475,34 +518,44 @@ function runInit(regen: boolean): void {
 
   let spec = generateSpec(ir, { projectName: detectProjectName(root) });
   const specPath = join(root, SPEC_FILE);
+  let oldName: string | undefined;
   if (existsSync(specPath)) {
     if (!regen) {
       fail(`${SPEC_FILE} already exists. Use \`autocli regen\` to refresh it (your edits are preserved).`);
     }
     const old = JSON.parse(readFileSync(specPath, "utf8")) as AutocliSpec;
+    // Pre-cliName specs shipped their skill under the generic name.
+    oldName = old.cliName ?? "autocli";
     spec = mergeSpecs(old, spec);
-    console.error("Merged existing spec enrichments (descriptions, hints, workflows, redactions).");
+    console.error("Merged existing spec enrichments (name, descriptions, hints, workflows, redactions).");
   }
+  const name = spec.cliName;
+  const cli = cliRef(spec);
 
   writeFileSync(specPath, `${JSON.stringify(spec, null, 2)}\n`);
   const convexModulePath = join(root, "convex", "autocli.ts");
   writeFileSync(convexModulePath, generateConvexModule(spec));
-  writeFileSync(join(root, "AUTOCLI-INTERVIEW.md"), INTERVIEW_QUESTIONS);
-  mkdirSync(join(root, ".claude", "skills", "autocli"), { recursive: true });
-  writeFileSync(join(root, ".claude", "skills", "autocli", "SKILL.md"), renderSkill(spec));
+  writeFileSync(join(root, "AUTOCLI-INTERVIEW.md"), interviewQuestions(spec));
+  if (oldName && oldName !== name) cleanupRenamedArtifacts(root, oldName);
+  const shimPath = join(root, name);
+  writeFileSync(shimPath, shimSource());
+  chmodSync(shimPath, 0o755);
+  mkdirSync(join(root, ".claude", "skills", name), { recursive: true });
+  writeFileSync(join(root, ".claude", "skills", name, "SKILL.md"), renderSkill(spec));
 
   const tableCount = Object.keys(spec.tables).length;
   const searchCount = Object.values(spec.tables).filter((t) => t.search.length > 0).length;
   const redactedCount = Object.values(spec.tables).reduce((n, t) => n + t.redactedFields.length, 0);
   console.log(`✓ ${SPEC_FILE} — ${tableCount} tables, ${searchCount} searchable, ${redactedCount} fields auto-redacted`);
   console.log(`✓ convex/autocli.ts — read-only internal query surface (deploys with \`npx convex dev\`)`);
-  console.log(`✓ AUTOCLI-INTERVIEW.md — 5 questions to finish the CLI (or hand to an agent)`);
-  console.log(`✓ .claude/skills/autocli/SKILL.md — agents discover the CLI without prompting`);
+  console.log(`✓ ${name} — executable shim; this project's CLI answers to \`${cli}\``);
+  console.log(`✓ AUTOCLI-INTERVIEW.md — 6 questions to finish the CLI (or hand to an agent)`);
+  console.log(`✓ .claude/skills/${name}/SKILL.md — agents discover the CLI without prompting`);
   console.log("");
   console.log("Add to AGENTS.md / CLAUDE.md:");
-  console.log("  For data questions, start with `autocli --help`; do not guess flags from memory.");
+  console.log(`  For data questions, start with \`${cli} --help\`; do not guess flags from memory.`);
   console.log("");
-  console.log("Try: autocli --help   |   autocli tables   |   autocli guide");
+  console.log(`Try: ${cli} --help   |   ${cli} tables   |   ${cli} guide`);
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +601,7 @@ export function main(argv: string[]): void {
   if (cmd === "whois") {
     validateFlags(flags, [], "whois");
     const id = positional[1];
-    if (!id) fail("Usage: autocli whois <id>");
+    if (!id) fail(`Usage: ${cliRef(spec)} whois <id>`);
     const result = convexRun("whois", { id }, { projectDir: root, prod }) as {
       table: string | null;
       doc: Record<string, unknown> | null;
@@ -565,7 +618,7 @@ export function main(argv: string[]): void {
     if (result.table && result.doc) {
       console.log("");
       console.log("Next steps:");
-      console.log(`  autocli ${result.table} ${id}     -- linked records + labels`);
+      console.log(`  ${cliRef(spec)} ${result.table} ${id}     -- linked records + labels`);
     }
     return;
   }
@@ -575,7 +628,7 @@ export function main(argv: string[]): void {
     const names = Object.keys(spec.tables);
     const guess = names.filter((n) => n.toLowerCase().includes(cmd.toLowerCase())).slice(0, 5);
     fail(
-      `Unknown command or table "${cmd}".${guess.length > 0 ? ` Did you mean: ${guess.join(", ")}?` : ""}\nRun \`autocli tables\` for the full list, or \`autocli --help\` for usage.`,
+      `Unknown command or table "${cmd}".${guess.length > 0 ? ` Did you mean: ${guess.join(", ")}?` : ""}\nRun \`${cliRef(spec)} tables\` for the full list, or \`${cliRef(spec)} --help\` for usage.`,
     );
   }
 
@@ -592,7 +645,7 @@ export function main(argv: string[]): void {
       runCount(spec, table, flags, opts);
     } else if (sub === "search") {
       const query = positional[2];
-      if (!query) fail(`Usage: autocli ${table.name} search "query"`);
+      if (!query) fail(`Usage: ${cliRef(spec)} ${table.name} search "query"`);
       const searchFlags = (table.search[0]?.filterFields ?? []).flatMap((field) => {
         const f = table.filters.find((x) => x.field === field);
         return f ? [f.flag, f.field] : [field];

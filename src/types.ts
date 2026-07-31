@@ -176,6 +176,8 @@ export interface AutocliSpec {
   specVersion: 1;
   adapter: "convex";
   projectName: string;
+  /** The name this CLI answers to in the target project (shim + all rendered commands). */
+  cliName: string;
   schemaHash: string;
   defaults: SpecDefaults;
   workflows: WorkflowSpec[];

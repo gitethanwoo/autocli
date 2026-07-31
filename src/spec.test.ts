@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseRawSchema } from "./introspect.js";
-import { DEFAULTS, generateSpec, kebab, singular } from "./spec.js";
+import { cliRef, DEFAULTS, deriveCliName, generateSpec, kebab, normalizeStepCmd, singular } from "./spec.js";
 import type { RawSchemaExport, RawTableJson, TableSpec, ValidatorJson } from "./types.js";
 
 import { EMPTY_IR, hasFixture, loadFixtureIR } from "./fixture-helper.js";
@@ -251,6 +251,33 @@ describe("generateSpec heuristics (synthetic schemas)", () => {
     ]);
     // items has an FK but no index starting with it — filter exists, hasMany doesn't.
     expect(teams?.hasMany.some((r) => r.table === "items")).toBe(false);
+  });
+});
+
+describe("cli naming", () => {
+  it("derives an indicative default from the package name", () => {
+    expect(deriveCliName("claudebase")).toBe("claudebase");
+    expect(deriveCliName("@acme/my_app")).toBe("my-app");
+    expect(deriveCliName("")).toBe("autocli");
+  });
+
+  it("generateSpec stamps the derived name unless overridden", () => {
+    const s = specFrom([rawTable("posts", { title: req(str) })]);
+    expect(s.cliName).toBe("synthetic");
+    if (hasFixture) expect(spec.cliName).toBe("faithbase");
+  });
+
+  it("cliRef renders the root shim path, falling back for pre-cliName specs", () => {
+    expect(cliRef({ cliName: "fb" })).toBe("./fb");
+    expect(cliRef({ cliName: "" })).toBe("autocli");
+  });
+
+  it("normalizeStepCmd rewrites canonical and stale shim prefixes only", () => {
+    expect(normalizeStepCmd("autocli jobs count --by status", "./fb")).toBe("./fb jobs count --by status");
+    expect(normalizeStepCmd("./oldname jobs", "./fb")).toBe("./fb jobs");
+    expect(normalizeStepCmd("npx convex run x", "./fb")).toBe("npx convex run x");
+    // "autocli" as a substring of a longer first token is left alone
+    expect(normalizeStepCmd("autocli2 foo", "./fb")).toBe("autocli2 foo");
   });
 });
 

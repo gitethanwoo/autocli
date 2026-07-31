@@ -1,5 +1,5 @@
 import type { AutocliSpec, TableSpec } from "./types.js";
-import { kebab } from "./spec.js";
+import { cliRef, kebab } from "./spec.js";
 
 const CELL_MAX = 40;
 const BLOB_DETAIL_MAX = 400;
@@ -62,7 +62,7 @@ export function renderList(input: ListRenderInput): string {
   parts.push(`${table.name}${filterNote} — ${page.length} row${page.length === 1 ? "" : "s"}${isDone ? "" : ", more available"}`);
   if (page.length === 0) {
     parts.push("");
-    parts.push(emptyListHint(table, activeFilters));
+    parts.push(emptyListHint(spec, table, activeFilters));
     return parts.join("\n");
   }
   const columns = [...table.identityFields, "_creationTime"];
@@ -84,15 +84,16 @@ export function renderList(input: ListRenderInput): string {
     parts.push(`\n(${trimmed} rows hidden to fit output budget — narrow with filters or use count)`);
   }
 
+  const cli = cliRef(spec);
   const first = rows[0];
   const firstId = first ? String(first["_id"] ?? "<id>") : "<id>";
-  const next: string[] = [`  autocli ${table.name} ${firstId}     -- full record + linked data`];
+  const next: string[] = [`  ${cli} ${table.name} ${firstId}     -- full record + linked data`];
   if (!isDone && cursor) {
-    next.push(`  autocli ${table.name} --cursor '${cursor.slice(0, 24)}…'   -- next page (use full cursor from --json)`);
+    next.push(`  ${cli} ${table.name} --cursor '${cursor.slice(0, 24)}…'   -- next page (use full cursor from --json)`);
   }
   const enumFilter = table.filters.find((f) => f.enumValues && f.enumValues.length > 1);
   if (enumFilter) {
-    next.push(`  autocli ${table.name} count --by ${enumFilter.field}   -- distribution instead of rows`);
+    next.push(`  ${cli} ${table.name} count --by ${enumFilter.field}   -- distribution instead of rows`);
   }
   parts.push("");
   parts.push("Next steps:");
@@ -100,9 +101,9 @@ export function renderList(input: ListRenderInput): string {
   return parts.join("\n");
 }
 
-function emptyListHint(table: TableSpec, activeFilters: string[]): string {
+function emptyListHint(spec: AutocliSpec, table: TableSpec, activeFilters: string[]): string {
   if (activeFilters.length > 0) {
-    return `No rows match. Try dropping a filter, or: autocli ${table.name} count`;
+    return `No rows match. Try dropping a filter, or: ${cliRef(spec)} ${table.name} count`;
   }
   return `Table is empty.`;
 }
@@ -153,7 +154,7 @@ export function renderDetail(input: DetailRenderInput): string {
       const flagName = relSpec?.filters.find((f) => f.field === r.field)?.flag ?? kebab(r.field);
       const countLabel = r.capped ? `${r.count}+` : String(r.count);
       parts.push(
-        `  ${r.table.padEnd(24)} ${countLabel.padStart(4)}   autocli ${r.table} --${flagName} ${String(doc["_id"] ?? "")}`,
+        `  ${r.table.padEnd(24)} ${countLabel.padStart(4)}   ${cliRef(spec)} ${r.table} --${flagName} ${String(doc["_id"] ?? "")}`,
       );
     }
   }

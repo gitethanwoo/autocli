@@ -55,6 +55,44 @@ const IDENTITY_SUFFIX_RE = /(type|kind|status|state)$/i;
 
 export interface GenerateSpecOptions {
   projectName: string;
+  cliName?: string;
+}
+
+/**
+ * Default CLI name for a project: the package name, kebab-cased, scope
+ * stripped. The interview invites a human (or finishing agent) to rename it —
+ * the name is instance knowledge, like workflows.
+ */
+export function deriveCliName(projectName: string): string {
+  const bare = projectName.replace(/^@[^/]+\//, "");
+  const name = kebab(bare).replace(/[^a-z0-9-]/g, "");
+  return name.length > 0 ? name : "autocli";
+}
+
+/**
+ * How rendered commands refer to the CLI: the project shim, invocable verbatim
+ * from the project root. Falls back for specs generated before cliName existed.
+ */
+export function cliRef(spec: Pick<AutocliSpec, "cliName">): string {
+  return spec.cliName ? `./${spec.cliName}` : "autocli";
+}
+
+/**
+ * Workflow steps are stored with whatever CLI name was current when written
+ * (the seed uses the canonical `autocli` prefix). Substitute the current name
+ * at render time so renaming the CLI never strands stale commands.
+ */
+export function normalizeStepCmd(cmd: string, cli: string): string {
+  return cmd.replace(/^(autocli|\.\/[a-z0-9_-]+)(?=\s|$)/, cli);
+}
+
+/**
+ * Step notes are prose and may mention commands inline ("then `autocli foo
+ * <id>`"). Rewrite the canonical name when it's used as a command (followed
+ * by whitespace) — `autocli.spec.json` and the like are left alone.
+ */
+export function normalizeStepNote(note: string, cli: string): string {
+  return note.replace(/\bautocli(?=\s)/g, cli);
 }
 
 export function generateSpec(ir: SchemaIR, opts: GenerateSpecOptions): AutocliSpec {
@@ -66,6 +104,7 @@ export function generateSpec(ir: SchemaIR, opts: GenerateSpecOptions): AutocliSp
     specVersion: 1,
     adapter: "convex",
     projectName: opts.projectName,
+    cliName: opts.cliName ?? deriveCliName(opts.projectName),
     schemaHash: ir.schemaHash,
     defaults: { ...DEFAULTS },
     workflows: generateWorkflows(ir),

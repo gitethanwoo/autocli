@@ -6,6 +6,9 @@
   "bin": {
     "autocli": "./bin/autocli.js"
   },
+  "exports": {
+    "./cli": "./dist/cli.js"
+  },
   "files": [
     "bin",
     "dist"
