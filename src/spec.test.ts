@@ -61,6 +61,30 @@ describe.skipIf(!hasFixture)("generateSpec redaction heuristics (faithbase fixtu
     expect(specTable("organizations").redactedFields).not.toContain("rateLimitTokens");
   });
 
+  it('a bare "Key" suffix is an identifier, not a secret; credential keys still redact', () => {
+    const s = specFrom([
+      rawTable("things", {
+        questionKey: req(str),
+        stageKey: req(str),
+        apiKey: req(str),
+        signingKey: req(str),
+        key: req(str),
+      }),
+    ]);
+    expect(s.tables["things"]?.redactedFields).toEqual(["apiKey", "signingKey", "key"]);
+  });
+
+  it("PII field names only redact string values (emailVerified boolean stays)", () => {
+    const s = specFrom([
+      rawTable("accounts", {
+        email: req(str),
+        emailVerified: req({ type: "boolean" }),
+        phoneVerificationTime: req(num),
+      }),
+    ]);
+    expect(s.tables["accounts"]?.redactedFields).toEqual(["email"]);
+  });
+
   it("redacted top-level spec: every redacted field exists on its table", () => {
     for (const t of Object.values(spec.tables)) {
       const irTable = ir.tables.find((x) => x.name === t.name);
@@ -295,8 +319,9 @@ describe("kebab", () => {
   it("leaves lowercase words alone", () => {
     expect(kebab("status")).toBe("status");
   });
-  it("collapses consecutive capitals (no boundary detected)", () => {
-    expect(kebab("HTMLContent")).toBe("htmlcontent");
+  it("splits a cap-run from a following capitalized word", () => {
+    expect(kebab("HTMLContent")).toBe("html-content");
+    expect(kebab("memberAId")).toBe("member-a-id");
   });
 });
 

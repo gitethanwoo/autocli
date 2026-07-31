@@ -25,7 +25,11 @@ const SECRET_RE = /(secret|password|passwd|apikey|api_key|credential|signature|s
  * credentials, but `tokensPrompt`/`rateLimitTokens`/`promptTokens` are usage
  * counters and must stay visible.
  */
-const SECRET_SUFFIX_RE = /(token|key|secret|password)$/i;
+// "token"/"secret"/"password" as suffixes are near-always credentials, but a
+// bare "Key" suffix is usually an identifier (questionKey, stageKey, cacheKey)
+// — only credential-flavored key names redact.
+const SECRET_SUFFIX_RE = /(token|secret|password)$/i;
+const KEY_SUFFIX_RE = /(^key$|(api|access|secret|private|signing|encryption|deploy|auth|session|webhook|stripe|license)[_-]?key$)/i;
 /** Redacted by default, flagged for the finishing interview: PII. */
 const PII_RE = /(email|phone|address|firstname|first_name|lastname|last_name|fullname|full_name|birthdate|dob)/i;
 /** Epoch-ms timestamp fields: served by --since/--until, never by eq flags. */
@@ -114,7 +118,15 @@ export function generateSpec(ir: SchemaIR, opts: GenerateSpecOptions): AutocliSp
 
 function generateTableSpec(t: TableIR, ir: SchemaIR): TableSpec {
   const redactedFields = t.fields
-    .filter((f) => SECRET_RE.test(f.name) || SECRET_SUFFIX_RE.test(f.name) || PII_RE.test(f.name))
+    .filter(
+      (f) =>
+        SECRET_RE.test(f.name) ||
+        SECRET_SUFFIX_RE.test(f.name) ||
+        KEY_SUFFIX_RE.test(f.name) ||
+        // PII names only redact string values — emailVerified (boolean) or
+        // phoneVerificationTime (number) can't leak an address.
+        (PII_RE.test(f.name) && f.kind === "string"),
+    )
     .map((f) => f.name);
   // "name" is a label on entity tables (organizations, agents) but PII on
   // person tables. Signal: a table that also stores email/phone is about
@@ -338,6 +350,8 @@ function generateWorkflows(ir: SchemaIR): WorkflowSpec[] {
 export function kebab(s: string): string {
   return s
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    // cap-run followed by a capitalized word: memberAId → member-a-id
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
     .replace(/_/g, "-")
     .toLowerCase();
 }

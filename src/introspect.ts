@@ -52,6 +52,63 @@ export function findSchemaFile(projectDir: string): string {
   );
 }
 
+const SPAWN_OPTS = {
+  encoding: "utf8" as const,
+  maxBuffer: 64 * 1024 * 1024,
+  timeout: 120_000,
+};
+
+function extractFenced(out: string): string | null {
+  const start = out.indexOf(BEGIN);
+  const end = out.indexOf(END);
+  if (start === -1 || end === -1) return null;
+  return out.slice(start + BEGIN.length, end);
+}
+
+/**
+ * Primary path: bundle schema.ts with esbuild in ESM mode — the same way the
+ * Convex CLI evaluates it. This sidesteps CJS/ESM interop failures (e.g. a
+ * dependency whose exports map only defines an `import` condition, which
+ * breaks when tsx compiles schema.ts as CJS in a non-"type":"module" project).
+ */
+function resolveEsbuildBin(projectDir: string): string | null {
+  // esbuild is a transitive dep of convex; pnpm doesn't hoist its binary, so
+  // resolve it through the project's own convex package instead of npx.
+  const script =
+    "try { console.log(require.resolve('esbuild/bin/esbuild')) } catch { console.log(require.resolve('esbuild/bin/esbuild', {paths:[require('path').dirname(require.resolve('convex/package.json'))]})) }";
+  const res = spawnSync("node", ["-e", script], { cwd: projectDir, ...SPAWN_OPTS });
+  const out = (res.stdout ?? "").trim();
+  return res.status === 0 && out.length > 0 ? out : null;
+}
+
+function evalViaEsbuild(projectDir: string, schemaPath: string, dir: string, loaderPath: string): { raw: string | null; err: string } {
+  const esbuildBin = resolveEsbuildBin(projectDir);
+  if (esbuildBin === null) return { raw: null, err: "esbuild: not resolvable from the project (nor via its convex dependency)" };
+  const bundlePath = join(dir, "schema.bundle.mjs");
+  const bundle = spawnSync(
+    "node",
+    [esbuildBin, schemaPath, "--bundle", "--format=esm", "--platform=node", `--outfile=${bundlePath}`, "--log-level=silent"],
+    { cwd: projectDir, ...SPAWN_OPTS },
+  );
+  if (bundle.error || bundle.status !== 0) {
+    return { raw: null, err: `esbuild: ${bundle.error?.message ?? (bundle.stderr ?? "").slice(-1000)}` };
+  }
+  const res = spawnSync("node", [loaderPath, bundlePath], { cwd: projectDir, ...SPAWN_OPTS });
+  if (res.error) return { raw: null, err: `node: ${res.error.message}` };
+  const raw = extractFenced(res.stdout ?? "");
+  if (res.status !== 0 || raw === null) return { raw: null, err: (res.stderr ?? "").slice(-1000) };
+  return { raw, err: "" };
+}
+
+/** Fallback: evaluate schema.ts directly with tsx in the project. */
+function evalViaTsx(projectDir: string, schemaPath: string, loaderPath: string): { raw: string | null; err: string } {
+  const res = spawnSync("npx", ["tsx", loaderPath, schemaPath], { cwd: projectDir, ...SPAWN_OPTS });
+  if (res.error) return { raw: null, err: `tsx: ${res.error.message}` };
+  const raw = extractFenced(res.stdout ?? "");
+  if (res.status !== 0 || raw === null) return { raw: null, err: (res.stderr ?? "").slice(-2000) };
+  return { raw, err: "" };
+}
+
 /** Evaluate the project's schema module and return the raw export() JSON string. */
 export function loadRawSchema(projectDir: string): string {
   const schemaPath = findSchemaFile(projectDir);
@@ -59,22 +116,13 @@ export function loadRawSchema(projectDir: string): string {
   const loaderPath = join(dir, "loader.mjs");
   try {
     writeFileSync(loaderPath, LOADER_SOURCE);
-    const res = spawnSync("npx", ["tsx", loaderPath, schemaPath], {
-      cwd: projectDir,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 120_000,
-    });
-    if (res.error) throw new IntrospectError(`Failed to run schema loader: ${res.error.message}`);
-    const out = res.stdout ?? "";
-    const start = out.indexOf(BEGIN);
-    const end = out.indexOf(END);
-    if (res.status !== 0 || start === -1 || end === -1) {
-      throw new IntrospectError(
-        `Evaluating convex/schema.ts failed (exit ${res.status}).\n${(res.stderr ?? "").slice(-2000)}`,
-      );
-    }
-    return out.slice(start + BEGIN.length, end);
+    const viaEsbuild = evalViaEsbuild(projectDir, schemaPath, dir, loaderPath);
+    if (viaEsbuild.raw !== null) return viaEsbuild.raw;
+    const viaTsx = evalViaTsx(projectDir, schemaPath, loaderPath);
+    if (viaTsx.raw !== null) return viaTsx.raw;
+    throw new IntrospectError(
+      `Evaluating convex/schema.ts failed.\n— esbuild bundle path —\n${viaEsbuild.err}\n— tsx path —\n${viaTsx.err}`,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
