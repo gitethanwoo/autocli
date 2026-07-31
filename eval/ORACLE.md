@@ -71,6 +71,41 @@ implementation-detail tables are not.
   tables), so exact table-shape matches are weaker evidence than
   capability-level matches.
 
+## Ablation: same pitch, no CLI framing
+
+Control agent, same pitch, same no-tools constraint, asked only to "predict
+what this product will need to build over its first year" — no mention of
+CLIs, schemas, or operational entities (a first control draft that said
+"design the schema, include queues/events/rollups" was discarded as
+contaminated). It produced 25 confidence-ordered predictions.
+
+**Control hits against the 43-table delta:** Stripe webhook/dunning plumbing
+(`stripeWebhookEvents`, `billingUsageNotifications`), rate limiting
+(`visitorRateLimits`), per-tenant LLM cost tracking (`llmCostLedger`),
+transactional email machinery (`ruleEmailEvents`, `playbookEmailEvents`,
+`prayerDigestDispatchState`), transcript pipeline (`sourceItemTranscripts`),
+re-embedding/migration tooling (`retrievalScopeBackfillControls`,
+`usageEventAggregateBackfillState` — and fb-v1's `regenerate`), tenant-scoping
+audit (`retrievalScopeBackfillControls` again), and — notably — **privacy/
+data-deletion** (`dataExports`, `dataExportParts`, `legalAcceptances`,
+`signedUrlNonceLog`), the category the CLI-framed oracle missed entirely.
+
+**What only the CLI frame surfaced:** the eval harness as a first-class
+system (control predicted only a thumbs/unanswered-question loop — adjacent,
+but not `evalDatasets`/`evalGrades`/`evalResponses`), usage rollup tables as
+entities, and the retrieval `dry-run`/replay command.
+
+**Verdict:** the model prior does most of the predictive work; the frame is
+not magic. But the frames bias *which* categories surface — the CLI lens
+over-samples observability/quality infrastructure ("what will we need to ask
+the system?"), the plain product lens over-samples lifecycle/compliance/
+engineering-reality work the schema only partially reflects. They are
+complementary, and the CLI frame's distinct advantage is its output format:
+an implementable artifact (entities, indexes, workflows you can hand to
+autocli or a schema author) rather than prose predictions. Caveat: both arms
+are single runs of the same model — category differences at n=1 are
+suggestive, not established.
+
 ## Product implication for autocli
 
 A plausible mode: given a young schema + the pitch, predict the ideal CLI,
