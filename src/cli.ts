@@ -1,0 +1,528 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { convexRun, ConvexRunError } from "./convex-run.js";
+import { renderCount, renderDetail, renderList, renderWhois } from "./format.js";
+import { renderGuide, renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
+import { introspectConvexProject, IntrospectError } from "./introspect.js";
+import { planQuery } from "./planner.js";
+import { generateConvexModule } from "./gen-convex.js";
+import { generateSpec } from "./spec.js";
+import type { AutocliSpec, FilterSpec, TableSpec } from "./types.js";
+
+const SPEC_FILE = "autocli.spec.json";
+
+interface Parsed {
+  positional: string[];
+  flags: Map<string, string | true>;
+}
+
+function parseArgs(argv: string[]): Parsed {
+  const positional: string[] = [];
+  const flags = new Map<string, string | true>();
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === undefined) continue;
+    if (a.startsWith("--")) {
+      const name = a.slice(2);
+      const eq = name.indexOf("=");
+      if (eq >= 0) {
+        flags.set(name.slice(0, eq), name.slice(eq + 1));
+      } else {
+        const next = argv[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          flags.set(name, next);
+          i++;
+        } else {
+          flags.set(name, true);
+        }
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { positional, flags };
+}
+
+function fail(message: string): never {
+  console.error(`✗ ${message}`);
+  process.exit(1);
+}
+
+function findProjectRoot(start: string): { root: string; specPath: string } | null {
+  let dir = resolve(start);
+  for (;;) {
+    const specPath = join(dir, SPEC_FILE);
+    if (existsSync(specPath)) return { root: dir, specPath };
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function loadSpec(): { spec: AutocliSpec; root: string } {
+  const found = findProjectRoot(process.cwd());
+  if (!found) {
+    fail(`No ${SPEC_FILE} found in this directory or any parent. Run \`autocli init\` in a Convex project root first.`);
+  }
+  const spec = JSON.parse(readFileSync(found.specPath, "utf8")) as AutocliSpec;
+  return { spec, root: found.root };
+}
+
+// ---------------------------------------------------------------------------
+// Value coercion
+// ---------------------------------------------------------------------------
+
+function coerceFilterValue(f: FilterSpec, raw: string): unknown {
+  if (f.enumValues) {
+    const match = f.enumValues.find((v) => String(v) === raw);
+    if (match === undefined) {
+      fail(`--${f.flag} must be one of: ${f.enumValues.join(", ")} (got "${raw}")`);
+    }
+    return match;
+  }
+  switch (f.kind) {
+    case "number": {
+      const n = Number(raw);
+      if (Number.isNaN(n)) fail(`--${f.flag} expects a number (got "${raw}")`);
+      return n;
+    }
+    case "boolean": {
+      if (raw !== "true" && raw !== "false") fail(`--${f.flag} expects true|false (got "${raw}")`);
+      return raw === "true";
+    }
+    default:
+      return raw;
+  }
+}
+
+/** Accepts ISO dates, epoch ms, and durations like 90m / 24h / 7d / 2w. */
+export function parseTime(raw: string, now: number): number {
+  const dur = /^(\d+)([smhdw])$/.exec(raw);
+  if (dur) {
+    const n = Number(dur[1]);
+    const unit = dur[2];
+    const ms =
+      unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : unit === "d" ? 86_400_000 : 604_800_000;
+    return now - n * ms;
+  }
+  if (/^\d{12,14}$/.test(raw)) return Number(raw);
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) {
+    fail(`Could not parse time "${raw}". Use ISO (2026-07-01), epoch ms, or a duration (30m, 24h, 7d).`);
+  }
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Table commands
+// ---------------------------------------------------------------------------
+
+interface CommonOpts {
+  root: string;
+  prod: boolean;
+  json: boolean;
+}
+
+interface QueryArgs {
+  eqFields: string[];
+  eqValues: unknown[];
+  activeFilters: string[];
+  since?: number;
+  until?: number;
+  index?: string;
+}
+
+function buildQueryArgs(table: TableSpec, flags: Map<string, string | true>): QueryArgs {
+  const providedFilters: { f: FilterSpec; value: unknown }[] = [];
+  for (const f of table.filters) {
+    const raw = flags.get(f.flag) ?? flags.get(f.field);
+    if (raw === undefined) continue;
+    if (raw === true) fail(`--${f.flag} needs a value`);
+    providedFilters.push({ f, value: coerceFilterValue(f, raw) });
+  }
+
+  const plan = planQuery(
+    table,
+    providedFilters.map((p) => p.f.field),
+  );
+  if (!plan.ok) {
+    const combos = plan.validCombos
+      .filter((c) => c.length > 0)
+      .map((c) => `  ${c.map((x) => `--${table.filters.find((f) => f.field === x)?.flag ?? x}`).join(" ")}`)
+      .join("\n");
+    fail(`${plan.message}\nValid filter combinations for ${table.name}:\n${combos || "  (none — this table has no indexed filters)"}`);
+  }
+
+  const byField = new Map(providedFilters.map((p) => [p.f.field, p.value]));
+  const eqValues = plan.fields.map((field) => byField.get(field));
+  const args: QueryArgs = {
+    eqFields: plan.fields,
+    eqValues,
+    activeFilters: providedFilters.map((p) => `${p.f.field}=${String(p.value)}`),
+  };
+  if (plan.index !== undefined) args.index = plan.index;
+
+  const now = Date.now();
+  const since = flags.get("since");
+  if (since !== undefined) {
+    if (since === true) fail("--since needs a value");
+    args.since = parseTime(since, now);
+    args.activeFilters.push(`since ${since}`);
+  }
+  const until = flags.get("until");
+  if (until !== undefined) {
+    if (until === true) fail("--until needs a value");
+    args.until = parseTime(until, now);
+    args.activeFilters.push(`until ${until}`);
+  }
+  return args;
+}
+
+function getLimit(flags: Map<string, string | true>, spec: AutocliSpec): number | undefined {
+  const raw = flags.get("limit");
+  if (raw === undefined) return undefined;
+  if (raw === true) fail("--limit needs a number");
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) fail(`--limit expects a positive integer (got "${raw}")`);
+  if (n > spec.defaults.maxRowLimit) {
+    console.error(`(--limit capped at ${spec.defaults.maxRowLimit})`);
+    return spec.defaults.maxRowLimit;
+  }
+  return n;
+}
+
+function runList(spec: AutocliSpec, table: TableSpec, flags: Map<string, string | true>, opts: CommonOpts): void {
+  const q = buildQueryArgs(table, flags);
+  const payload: Record<string, unknown> = {
+    table: table.name,
+    eqFields: q.eqFields,
+    eqValues: q.eqValues,
+  };
+  if (q.index !== undefined) payload["index"] = q.index;
+  if (q.since !== undefined) payload["since"] = q.since;
+  if (q.until !== undefined) payload["until"] = q.until;
+  const limit = getLimit(flags, spec);
+  if (limit !== undefined) payload["limit"] = limit;
+  const order = flags.get("order");
+  if (order === "asc" || order === "desc") payload["order"] = order;
+  const cursor = flags.get("cursor");
+  if (typeof cursor === "string") payload["cursor"] = cursor;
+  const fields = flags.get("fields");
+  if (typeof fields === "string") payload["fields"] = fields.split(",").map((s) => s.trim());
+  if (flags.get("full") === true) payload["full"] = true;
+
+  const result = convexRun("list", payload, { projectDir: opts.root, prod: opts.prod }) as {
+    page: Record<string, unknown>[];
+    isDone: boolean;
+    cursor: string | null;
+  };
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(
+    renderList({
+      spec,
+      table,
+      page: result.page,
+      isDone: result.isDone,
+      cursor: result.cursor,
+      activeFilters: q.activeFilters,
+    }),
+  );
+}
+
+function runDetail(spec: AutocliSpec, table: TableSpec, id: string, flags: Map<string, string | true>, opts: CommonOpts): void {
+  const result = convexRun("get", { table: table.name, id }, { projectDir: opts.root, prod: opts.prod }) as {
+    doc: Record<string, unknown> | null;
+    labels?: Record<string, string | null>;
+    related?: { table: string; field: string; count: number; capped: boolean }[];
+    error: string | null;
+  };
+  if (result.error) fail(`${result.error}\nHint: autocli whois ${id} resolves an id of unknown table.`);
+  if (!result.doc) {
+    fail(`No ${table.name} document with id ${id}. It may have been deleted.\nHint: autocli ${table.name} lists current rows.`);
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(
+    renderDetail({
+      spec,
+      table,
+      doc: result.doc,
+      labels: result.labels ?? {},
+      related: result.related ?? [],
+      full: flags.get("full") === true,
+    }),
+  );
+}
+
+function runCount(spec: AutocliSpec, table: TableSpec, flags: Map<string, string | true>, opts: CommonOpts): void {
+  const q = buildQueryArgs(table, flags);
+  const by = flags.get("by");
+  const payload: Record<string, unknown> = {
+    table: table.name,
+    eqFields: q.eqFields,
+    eqValues: q.eqValues,
+  };
+  if (q.index !== undefined) payload["index"] = q.index;
+  if (q.since !== undefined) payload["since"] = q.since;
+  if (q.until !== undefined) payload["until"] = q.until;
+  let result: unknown;
+  if (typeof by === "string") {
+    payload["by"] = by;
+    result = convexRun("countBy", payload, { projectDir: opts.root, prod: opts.prod });
+  } else {
+    result = convexRun("count", payload, { projectDir: opts.root, prod: opts.prod });
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(
+    renderCount(
+      table,
+      result as { count?: number; capped?: boolean; counts?: Record<string, number>; scanned?: number },
+      typeof by === "string" ? by : undefined,
+      q.activeFilters,
+    ),
+  );
+}
+
+function runSearch(spec: AutocliSpec, table: TableSpec, query: string, flags: Map<string, string | true>, opts: CommonOpts): void {
+  const s = table.search[0];
+  if (!s) {
+    fail(`${table.name} has no search index.\nTables with search: ${
+      Object.values(spec.tables)
+        .filter((t) => t.search.length > 0)
+        .map((t) => t.name)
+        .join(", ") || "(none)"
+    }`);
+  }
+  const filterFields: string[] = [];
+  const filterValues: unknown[] = [];
+  for (const field of s.filterFields) {
+    const filter = table.filters.find((f) => f.field === field);
+    const flagName = filter?.flag ?? field;
+    const raw = flags.get(flagName) ?? flags.get(field);
+    if (raw === undefined || raw === true) continue;
+    filterFields.push(field);
+    filterValues.push(filter ? coerceFilterValue(filter, raw) : raw);
+  }
+  const payload: Record<string, unknown> = { table: table.name, query, filterFields, filterValues };
+  const limit = getLimit(flags, spec);
+  if (limit !== undefined) payload["limit"] = limit;
+  const result = convexRun("search", payload, { projectDir: opts.root, prod: opts.prod }) as {
+    results: Record<string, unknown>[];
+  };
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(
+    renderList({
+      spec,
+      table,
+      page: result.results,
+      isDone: true,
+      cursor: null,
+      activeFilters: [`search "${query}"`],
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// init / regen
+// ---------------------------------------------------------------------------
+
+const INTERVIEW_QUESTIONS = `## Finishing interview — 5 questions for a human (or an agent who knows the product)
+
+The generated spec is a correct skeleton. These answers make it great. Record
+them by editing ${SPEC_FILE} (fields: workflows, tables.<name>.hint,
+tables.<name>.description, tables.<name>.redactedFields), then re-run
+\`autocli regen\` any time — schema changes merge in without clobbering your edits.
+
+1. Sensitive data: these fields were auto-redacted by name heuristics — review
+   the "redactedFields" of each table. Anything to un-redact? Anything missed?
+2. Workflows: what are the top 2-3 recurring questions you (or agents) ask of
+   this data? ("why is customer X broken", "what did agent Y retrieve", ...)
+   Replace the generated seed workflow with numbered real ones.
+3. Cost/danger hints: which tables are huge, expensive, or misleading without
+   context? Add a "hint" to those tables.
+4. Descriptions: skim the generated one-liners in \`autocli tables\` — fix any
+   that describe the schema but miss the intent.
+5. Prod policy: is read-only prod access via --prod acceptable, or should this
+   CLI stay dev-only? (If dev-only, say so in your agent instructions.)
+`;
+
+function detectProjectName(root: string): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name?: string };
+    if (pkg.name) return pkg.name;
+  } catch {
+    // fall through
+  }
+  return resolve(root).split("/").pop() ?? "project";
+}
+
+/** Preserve human-editable enrichments across regeneration. */
+function mergeSpecs(old: AutocliSpec, fresh: AutocliSpec): AutocliSpec {
+  const merged: AutocliSpec = { ...fresh };
+  const keptWorkflows = old.workflows.filter((w) => w.todo !== true);
+  if (keptWorkflows.length > 0) merged.workflows = keptWorkflows;
+  for (const [name, freshTable] of Object.entries(fresh.tables)) {
+    const oldTable = old.tables[name];
+    if (!oldTable) continue;
+    merged.tables[name] = {
+      ...freshTable,
+      description: oldTable.description,
+      // Display preferences are human-owned; the server-side projection
+      // silently skips fields that no longer exist after a schema change.
+      identityFields: oldTable.identityFields,
+      redactedFields: oldTable.redactedFields,
+      blobFields: oldTable.blobFields,
+      ...(oldTable.hint ? { hint: oldTable.hint } : {}),
+      ...(oldTable.labelField ? { labelField: oldTable.labelField } : {}),
+    };
+  }
+  return merged;
+}
+
+function runInit(regen: boolean): void {
+  const root = process.cwd();
+  if (!existsSync(join(root, "convex"))) {
+    fail("No convex/ directory here. Run autocli init from your Convex project root.");
+  }
+  console.error(`Introspecting Convex schema in ${root}…`);
+  let ir;
+  try {
+    ir = introspectConvexProject(root);
+  } catch (e) {
+    if (e instanceof IntrospectError) fail(e.message);
+    throw e;
+  }
+  console.error(`Found ${ir.tables.length} tables.`);
+
+  let spec = generateSpec(ir, { projectName: detectProjectName(root) });
+  const specPath = join(root, SPEC_FILE);
+  if (existsSync(specPath)) {
+    if (!regen) {
+      fail(`${SPEC_FILE} already exists. Use \`autocli regen\` to refresh it (your edits are preserved).`);
+    }
+    const old = JSON.parse(readFileSync(specPath, "utf8")) as AutocliSpec;
+    spec = mergeSpecs(old, spec);
+    console.error("Merged existing spec enrichments (descriptions, hints, workflows, redactions).");
+  }
+
+  writeFileSync(specPath, `${JSON.stringify(spec, null, 2)}\n`);
+  const convexModulePath = join(root, "convex", "autocli.ts");
+  writeFileSync(convexModulePath, generateConvexModule(spec));
+  writeFileSync(join(root, "AUTOCLI-INTERVIEW.md"), INTERVIEW_QUESTIONS);
+
+  const tableCount = Object.keys(spec.tables).length;
+  const searchCount = Object.values(spec.tables).filter((t) => t.search.length > 0).length;
+  const redactedCount = Object.values(spec.tables).reduce((n, t) => n + t.redactedFields.length, 0);
+  console.log(`✓ ${SPEC_FILE} — ${tableCount} tables, ${searchCount} searchable, ${redactedCount} fields auto-redacted`);
+  console.log(`✓ convex/autocli.ts — read-only internal query surface (deploys with \`npx convex dev\`)`);
+  console.log(`✓ AUTOCLI-INTERVIEW.md — 5 questions to finish the CLI (or hand to an agent)`);
+  console.log("");
+  console.log("Add to AGENTS.md / CLAUDE.md:");
+  console.log("  For data questions, start with `autocli --help`; do not guess flags from memory.");
+  console.log("");
+  console.log("Try: autocli --help   |   autocli tables   |   autocli guide");
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+export function main(argv: string[]): void {
+  const { positional, flags } = parseArgs(argv);
+  const json = flags.get("json") === true;
+  const prod = flags.get("prod") === true;
+  const wantHelp = flags.get("help") === true || positional.includes("help");
+
+  const cmd = positional[0];
+
+  if (cmd === "init" || cmd === "regen") {
+    runInit(cmd === "regen");
+    return;
+  }
+
+  if (cmd === undefined || (wantHelp && cmd === undefined)) {
+    const { spec } = loadSpec();
+    console.log(renderTopHelp(spec));
+    return;
+  }
+
+  const { spec, root } = loadSpec();
+  const opts: CommonOpts = { root, prod, json };
+
+  if (cmd === "guide") {
+    console.log(renderGuide(spec));
+    return;
+  }
+  if (cmd === "tables") {
+    console.log(renderTablesOverview(spec));
+    return;
+  }
+  if (wantHelp && positional.length === 1 && !spec.tables[cmd]) {
+    console.log(renderTopHelp(spec));
+    return;
+  }
+  if (cmd === "whois") {
+    const id = positional[1];
+    if (!id) fail("Usage: autocli whois <id>");
+    const result = convexRun("whois", { id }, { projectDir: root, prod }) as {
+      table: string | null;
+      doc: Record<string, unknown> | null;
+    };
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(renderWhois(spec, id, result));
+    if (result.table && result.doc) {
+      console.log("");
+      console.log("Next steps:");
+      console.log(`  autocli ${result.table} ${id}     -- linked records + labels`);
+    }
+    return;
+  }
+
+  const table = spec.tables[cmd];
+  if (!table) {
+    const names = Object.keys(spec.tables);
+    const guess = names.filter((n) => n.toLowerCase().includes(cmd.toLowerCase())).slice(0, 5);
+    fail(
+      `Unknown command or table "${cmd}".${guess.length > 0 ? ` Did you mean: ${guess.join(", ")}?` : ""}\nRun \`autocli tables\` for the full list, or \`autocli --help\` for usage.`,
+    );
+  }
+
+  if (wantHelp) {
+    console.log(renderTableHelp(spec, table));
+    return;
+  }
+
+  const sub = positional[1];
+  try {
+    if (sub === "count") {
+      runCount(spec, table, flags, opts);
+    } else if (sub === "search") {
+      const query = positional[2];
+      if (!query) fail(`Usage: autocli ${table.name} search "query"`);
+      runSearch(spec, table, query, flags, opts);
+    } else if (sub !== undefined) {
+      runDetail(spec, table, sub, flags, opts);
+    } else {
+      runList(spec, table, flags, opts);
+    }
+  } catch (e) {
+    if (e instanceof ConvexRunError) fail(e.message);
+    throw e;
+  }
+}
+
+main(process.argv.slice(2));
