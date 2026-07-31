@@ -142,7 +142,7 @@ interface ListArgsShape {
 interface RangeBuilder {
   eq(field: string, value: Value): RangeBuilder;
   gte(field: string, value: Value): RangeBuilder;
-  lte(field: string, value: Value): RangeBuilder;
+  lt(field: string, value: Value): RangeBuilder;
 }
 interface SearchFilterBuilder {
   search(field: string, query: string): SearchFilterBuilder;
@@ -194,8 +194,10 @@ function buildIndexedQuery(ctx: Ctx, a: ListArgsShape): IndexedQuery {
     // CLI's planner passes which field that is (implicit trailing
     // _creationTime, or a declared time field like createdAt).
     const rangeField = a.rangeField ?? "_creationTime";
+    // Half-open [since, until): windowed counts compose without boundary
+    // double-counting.
     if (a.since !== undefined) b = b.gte(rangeField, a.since);
-    if (a.until !== undefined) b = b.lte(rangeField, a.until);
+    if (a.until !== undefined) b = b.lt(rangeField, a.until);
     return b;
   });
 }
@@ -286,6 +288,40 @@ export const countBy = internalQueryGeneric({
       counts[key] = (counts[key] ?? 0) + 1;
     }
     return { counts, scanned: counted.length, capped };
+  },
+});
+
+// One bounded page of an exact count. The CLI drives the cursor loop, so no
+// single query ever exceeds one page — exact aggregation without temp code.
+export const countPage = internalQueryGeneric({
+  args: { ...listArgs, by: v.optional(v.string()) },
+  handler: async (rawCtx, rawArgs) => {
+    const ctx = asCtx(rawCtx);
+    const a = rawArgs as ListArgsShape & { by?: string };
+    const by = a.by;
+    if (by !== undefined) {
+      const redactedFields = REDACTED[a.table];
+      if (redactedFields && redactedFields.includes(by)) {
+        throw new Error(\`autocli: cannot group by redacted field "\${by}"\`);
+      }
+    }
+    const res = await buildIndexedQuery(ctx, a)
+      .order("desc")
+      .paginate({ numItems: COUNT_CAP, cursor: a.cursor ?? null });
+    const counts: Record<string, number> = {};
+    if (by !== undefined) {
+      for (const row of res.page) {
+        const key = row[by] === undefined ? "(unset)" : String(row[by]);
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+    }
+    return {
+      pageCount: res.page.length,
+      counts,
+      isDone: res.isDone,
+      cursor: res.isDone ? null : res.continueCursor,
+      schemaHash: SCHEMA_HASH,
+    };
   },
 });
 

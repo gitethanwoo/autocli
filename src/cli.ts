@@ -337,6 +337,10 @@ function runCount(spec: AutocliSpec, table: TableSpec, flags: Map<string, string
   if (q.since !== undefined) payload["since"] = q.since;
   if (q.until !== undefined) payload["until"] = q.until;
   if (q.rangeField !== undefined) payload["rangeField"] = q.rangeField;
+  if (flags.get("exact") === true) {
+    runExactCount(spec, table, payload, typeof by === "string" ? by : undefined, q.activeFilters, opts);
+    return;
+  }
   let result: unknown;
   if (typeof by === "string") {
     payload["by"] = by;
@@ -356,6 +360,66 @@ function runCount(spec: AutocliSpec, table: TableSpec, flags: Map<string, string
       q.activeFilters,
     ),
   );
+}
+
+/**
+ * Exact counts at any scale: drive the server's bounded countPage in a cursor
+ * loop. Each Convex query reads at most one page, so this stays inside the
+ * per-query read limits that make one-shot scans impossible on large tables —
+ * and it needs no temp code and no deploy.
+ */
+const EXACT_MAX_PAGES = 1000;
+
+function runExactCount(
+  spec: AutocliSpec,
+  table: TableSpec,
+  payload: Record<string, unknown>,
+  by: string | undefined,
+  activeFilters: string[],
+  opts: CommonOpts,
+): void {
+  if (by !== undefined) payload["by"] = by;
+  const counts: Record<string, number> = {};
+  let total = 0;
+  let pages = 0;
+  let cursor: string | null = null;
+  let truncated = false;
+  for (;;) {
+    if (cursor !== null) payload["cursor"] = cursor;
+    const res = convexRun("countPage", payload, { projectDir: opts.root, prod: opts.prod }) as {
+      pageCount: number;
+      counts: Record<string, number>;
+      isDone: boolean;
+      cursor: string | null;
+    };
+    total += res.pageCount;
+    for (const [k, n] of Object.entries(res.counts)) counts[k] = (counts[k] ?? 0) + n;
+    pages += 1;
+    if (res.isDone || res.cursor === null) break;
+    if (pages >= EXACT_MAX_PAGES) {
+      truncated = true;
+      break;
+    }
+    cursor = res.cursor;
+    if (pages % 20 === 0) process.stderr.write(`…${total} rows scanned\n`);
+  }
+  if (opts.json) {
+    console.log(JSON.stringify({ exact: !truncated, count: total, ...(by ? { counts } : {}), pages, truncated }, null, 2));
+    if (truncated) process.exit(1);
+    return;
+  }
+  console.log(
+    renderCount(
+      table,
+      by ? { counts, scanned: total, capped: false } : { count: total, capped: false },
+      by,
+      activeFilters,
+    ),
+  );
+  console.log(`(exact: ${total} rows aggregated across ${pages} bounded queries)`);
+  if (truncated) {
+    fail(`Stopped after ${EXACT_MAX_PAGES} pages (~${total} rows). Narrow with filters or --since/--until.`);
+  }
 }
 
 function runSearch(spec: AutocliSpec, table: TableSpec, query: string, flags: Map<string, string | true>, opts: CommonOpts): void {
@@ -641,7 +705,7 @@ export function main(argv: string[]): void {
   const filterFlags = table.filters.flatMap((f) => [f.flag, f.field]);
   try {
     if (sub === "count") {
-      validateFlags(flags, [...LIST_FLAGS, ...filterFlags, "by"], `${table.name} count`);
+      validateFlags(flags, [...LIST_FLAGS, ...filterFlags, "by", "exact"], `${table.name} count`);
       runCount(spec, table, flags, opts);
     } else if (sub === "search") {
       const query = positional[2];

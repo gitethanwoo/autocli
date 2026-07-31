@@ -37,7 +37,8 @@ export function renderTopHelp(spec: AutocliSpec): string {
   parts.push("Per-table commands:");
   parts.push(`  ${cli} <table>                    -- list rows (newest first, capped)`);
   parts.push(`  ${cli} <table> <id>               -- full record + linked-record counts`);
-  parts.push(`  ${cli} <table> count [--by f]     -- count or distribution, never dumps rows`);
+  parts.push(`  ${cli} <table> count [--by f]     -- fast count or distribution (sampled past ${spec.defaults.countCap} rows)`);
+  parts.push(`  ${cli} <table> count --exact ...  -- exact at any scale (paginated server-side)`);
   parts.push(`  ${cli} <table> search "query"     -- full-text search (tables marked "search")`);
   parts.push("");
   parts.push("Global commands:");
@@ -65,7 +66,7 @@ export function renderTableHelp(spec: AutocliSpec, t: TableSpec): string {
   parts.push(`Usage:`);
   parts.push(`  ${cli} ${t.name} [flags]              -- list (columns: ${t.identityFields.join(", ")})`);
   parts.push(`  ${cli} ${t.name} <id>                 -- full record`);
-  parts.push(`  ${cli} ${t.name} count [--by field]`);
+  parts.push(`  ${cli} ${t.name} count [--by field] [--exact]`);
   if (t.search.length > 0) {
     const s = t.search[0];
     if (s) {
@@ -158,7 +159,8 @@ unless --prod.
 ## High-leverage commands
 
 - \`${cli} <table> count --by <field> --since 24h\` — answer distribution
-  questions in ~30 tokens without fetching rows
+  questions in ~30 tokens without fetching rows (add \`--exact\` for a true
+  count on large tables)
 - \`${cli} whois <id>\` — resolve an id from a log/error to its record
 - \`${cli} tables\` — every table with its relations
 - \`${cli} guide\` — full usage guide, served by the binary (version-matched)
@@ -191,7 +193,12 @@ Secrets and PII are stripped server-side before anything reaches you.
 ## Answering "what happened?"
 
 - Prefer counts over rows: ${cli} <table> count --by <field> --since 24h
+- Counts are capped at ${spec.defaults.countCap} scanned rows by default; add --exact for a true
+  count at any scale (the CLI pages through bounded server queries — slower,
+  still read-only and index-backed).
 - Time-bound everything: --since accepts ISO dates, epoch ms, or durations (24h, 7d).
+- Windows are half-open [since, until): summing adjacent windows never
+  double-counts a boundary row.
 - If you hold an id from a log/error and don't know its table: ${cli} whois <id>.
 ${searchable.length > 0 ? `- Full-text search: ${searchable.map((n) => `${cli} ${n} search "..."`).join("; ")}.` : ""}
 

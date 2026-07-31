@@ -67,6 +67,17 @@ describe.skipIf(!hasFixture)("generateConvexModule (faithbase spec)", () => {
     expect(out).toContain(`const SCHEMA_HASH = "${spec.schemaHash}";`);
   });
 
+  it("emits countPage for exact paginated aggregation", () => {
+    expect(out).toContain("export const countPage = internalQueryGeneric");
+    expect(out).toContain('.paginate({ numItems: COUNT_CAP, cursor: a.cursor ?? null })');
+  });
+
+  it("time windows are half-open: gte since, lt until (never lte)", () => {
+    expect(out).toContain(".gte(rangeField, a.since)");
+    expect(out).toContain(".lt(rangeField, a.until)");
+    expect(out).not.toContain(".lte(");
+  });
+
   it("emits the internal query surface only", () => {
     expect(out).toContain('import { internalQueryGeneric } from "convex/server";');
     for (const fn of ["list", "get", "count", "countBy", "search", "whois"]) {
