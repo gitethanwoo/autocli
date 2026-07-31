@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { convexRun, ConvexRunError } from "./convex-run.js";
 import { renderCount, renderDetail, renderList, renderWhois } from "./format.js";
-import { renderGuide, renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
+import { renderGuide, renderSkill, renderTableHelp, renderTablesOverview, renderTopHelp } from "./help.js";
 import { introspectConvexProject, IntrospectError } from "./introspect.js";
 import { describeCombos, planQuery } from "./planner.js";
 import { generateConvexModule } from "./gen-convex.js";
@@ -488,6 +488,8 @@ function runInit(regen: boolean): void {
   const convexModulePath = join(root, "convex", "autocli.ts");
   writeFileSync(convexModulePath, generateConvexModule(spec));
   writeFileSync(join(root, "AUTOCLI-INTERVIEW.md"), INTERVIEW_QUESTIONS);
+  mkdirSync(join(root, ".claude", "skills", "autocli"), { recursive: true });
+  writeFileSync(join(root, ".claude", "skills", "autocli", "SKILL.md"), renderSkill(spec));
 
   const tableCount = Object.keys(spec.tables).length;
   const searchCount = Object.values(spec.tables).filter((t) => t.search.length > 0).length;
@@ -495,6 +497,7 @@ function runInit(regen: boolean): void {
   console.log(`✓ ${SPEC_FILE} — ${tableCount} tables, ${searchCount} searchable, ${redactedCount} fields auto-redacted`);
   console.log(`✓ convex/autocli.ts — read-only internal query surface (deploys with \`npx convex dev\`)`);
   console.log(`✓ AUTOCLI-INTERVIEW.md — 5 questions to finish the CLI (or hand to an agent)`);
+  console.log(`✓ .claude/skills/autocli/SKILL.md — agents discover the CLI without prompting`);
   console.log("");
   console.log("Add to AGENTS.md / CLAUDE.md:");
   console.log("  For data questions, start with `autocli --help`; do not guess flags from memory.");

@@ -5,8 +5,9 @@ import { parseRawSchema } from "./introspect.js";
 import { DEFAULTS, generateSpec, kebab, singular } from "./spec.js";
 import type { RawSchemaExport, RawTableJson, TableSpec, ValidatorJson } from "./types.js";
 
-const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/faithbase-schema.json", import.meta.url));
-const ir = parseRawSchema(readFileSync(FIXTURE_PATH, "utf8"));
+import { EMPTY_IR, hasFixture, loadFixtureIR } from "./fixture-helper.js";
+
+const ir = hasFixture ? loadFixtureIR() : EMPTY_IR;
 const spec = generateSpec(ir, { projectName: "faithbase" });
 
 function specTable(name: string): TableSpec {
@@ -47,7 +48,7 @@ const num: ValidatorJson = { type: "number" };
 
 // ---------------------------------------------------------------------------
 
-describe("generateSpec redaction heuristics (faithbase fixture)", () => {
+describe.skipIf(!hasFixture)("generateSpec redaction heuristics (faithbase fixture)", () => {
   it("redacts users.email", () => {
     expect(specTable("users").redactedFields).toContain("email");
   });
@@ -70,7 +71,7 @@ describe("generateSpec redaction heuristics (faithbase fixture)", () => {
   });
 });
 
-describe("generateSpec identity fields (faithbase fixture)", () => {
+describe.skipIf(!hasFixture)("generateSpec identity fields (faithbase fixture)", () => {
   it("picks known candidates first, excludes redacted fields, caps at 4 (users)", () => {
     const users = specTable("users");
     expect(users.identityFields).toEqual([
@@ -93,7 +94,7 @@ describe("generateSpec identity fields (faithbase fixture)", () => {
   });
 });
 
-describe("generateSpec filters (faithbase fixture)", () => {
+describe.skipIf(!hasFixture)("generateSpec filters (faithbase fixture)", () => {
   it("derives filters only from indexed fields (users)", () => {
     const users = specTable("users");
     expect(users.filters.map((f) => f.field).sort()).toEqual([
@@ -119,7 +120,7 @@ describe("generateSpec filters (faithbase fixture)", () => {
   });
 });
 
-describe("generateSpec relations (faithbase fixture)", () => {
+describe.skipIf(!hasFixture)("generateSpec relations (faithbase fixture)", () => {
   it("organizations hasMany users via the by_organizationId index", () => {
     const rel = specTable("organizations").hasMany.find((r) => r.table === "users");
     expect(rel).toEqual({
@@ -138,7 +139,7 @@ describe("generateSpec relations (faithbase fixture)", () => {
   });
 });
 
-describe("generateSpec workflows seed (faithbase fixture)", () => {
+describe.skipIf(!hasFixture)("generateSpec workflows seed (faithbase fixture)", () => {
   it("emits one todo workflow rooted at the most-referenced table", () => {
     expect(spec.workflows).toHaveLength(1);
     const wf = spec.workflows[0];
@@ -153,7 +154,7 @@ describe("generateSpec workflows seed (faithbase fixture)", () => {
   });
 });
 
-describe("generateSpec defaults and envelope", () => {
+describe.skipIf(!hasFixture)("generateSpec defaults and envelope", () => {
   it("copies DEFAULTS and stamps the schema hash", () => {
     expect(DEFAULTS).toEqual({ rowLimit: 20, maxRowLimit: 100, outputTokenBudget: 2000, countCap: 1000 });
     expect(spec.defaults).toEqual(DEFAULTS);
@@ -180,8 +181,10 @@ describe("generateSpec heuristics (synthetic schemas)", () => {
     const s = specFrom([rawTable("orgs", { name: req(str), slug: req(str) })]);
     expect(s.tables["orgs"]?.redactedFields).not.toContain("name");
     expect(s.tables["orgs"]?.labelField).toBe("name");
-    expect(specTable("organizations").redactedFields).not.toContain("name");
-    expect(specTable("organizations").labelField).toBe("name");
+    if (hasFixture) {
+      expect(specTable("organizations").redactedFields).not.toContain("name");
+      expect(specTable("organizations").labelField).toBe("name");
+    }
     const person = specFrom([rawTable("people", { firstName: req(str), fullName: req(str) })]);
     expect(person.tables["people"]?.redactedFields).toEqual(["firstName", "fullName"]);
   });

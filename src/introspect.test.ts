@@ -4,9 +4,10 @@ import { describe, expect, it } from "vitest";
 import { IntrospectError, parseRawSchema } from "./introspect.js";
 import type { RawSchemaExport, TableIR, ValidatorJson } from "./types.js";
 
-const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/faithbase-schema.json", import.meta.url));
-const raw = readFileSync(FIXTURE_PATH, "utf8");
-const ir = parseRawSchema(raw);
+import { EMPTY_IR, hasFixture, loadFixtureIR, loadFixtureRaw } from "./fixture-helper.js";
+
+const raw = hasFixture ? loadFixtureRaw() : "";
+const ir = hasFixture ? loadFixtureIR() : EMPTY_IR;
 
 function table(name: string): TableIR {
   const t = ir.tables.find((t) => t.name === name);
@@ -14,7 +15,7 @@ function table(name: string): TableIR {
   return t;
 }
 
-describe("parseRawSchema on the faithbase fixture", () => {
+describe.skipIf(!hasFixture)("parseRawSchema on the faithbase fixture", () => {
   it("parses all 63 tables", () => {
     expect(ir.tables).toHaveLength(63);
   });

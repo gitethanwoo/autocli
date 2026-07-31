@@ -6,8 +6,9 @@ import { parseRawSchema } from "./introspect.js";
 import { generateSpec } from "./spec.js";
 import type { AutocliSpec, SpecDefaults, TableSpec } from "./types.js";
 
-const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/faithbase-schema.json", import.meta.url));
-const ir = parseRawSchema(readFileSync(FIXTURE_PATH, "utf8"));
+import { EMPTY_IR, hasFixture, loadFixtureIR } from "./fixture-helper.js";
+
+const ir = hasFixture ? loadFixtureIR() : EMPTY_IR;
 const spec = generateSpec(ir, { projectName: "faithbase" });
 const out = generateConvexModule(spec);
 
@@ -39,7 +40,7 @@ function makeSpec(tables: TableSpec[], defaults: Partial<SpecDefaults> = {}): Au
   };
 }
 
-describe("generateConvexModule (faithbase spec)", () => {
+describe.skipIf(!hasFixture)("generateConvexModule (faithbase spec)", () => {
   it("bakes in the full table allowlist", () => {
     expect(out).toContain("const TABLES: readonly string[] =");
     const tablesBlock = out.slice(out.indexOf("const TABLES"), out.indexOf("const REDACTED"));

@@ -122,6 +122,48 @@ export function renderTablesOverview(spec: AutocliSpec): string {
   return parts.join("\n");
 }
 
+/**
+ * Generated Claude Code skill: makes the CLI discoverable without any prompt.
+ * Kept thin — `autocli guide` and `--help` are served by the binary itself and
+ * can never drift from it.
+ */
+export function renderSkill(spec: AutocliSpec): string {
+  const tables = Object.keys(spec.tables).sort();
+  const preview = tables.slice(0, 6).join(", ");
+  const hasTodoWorkflows = spec.workflows.some((w) => w.todo === true);
+  return `---
+name: autocli
+description: Query and explore ${spec.projectName}'s live Convex data (${preview}${tables.length > 6 ? ", …" : ""}). Use for any question about what's in the database — "what happened here", debugging data state, tracing a record by id, counting/segmenting rows. Read-only and token-lean. Start with \`autocli --help\`.
+---
+
+# autocli — ${spec.projectName} data exploration
+
+Generated from this project's Convex schema. Read-only, index-backed, bounded
+output. Run from the project root; targets the dev deployment unless --prod.
+
+## Core loop
+
+1. \`autocli --help\`        — workflows, tables, filters (the map)
+2. \`autocli <table>\`       — bounded list, newest first
+3. \`autocli <table> <id>\`  — full record + linked-record counts
+4. Copy the "Next steps" commands printed under every output — they contain
+   real ids from the data you just fetched.
+
+## High-leverage commands
+
+- \`autocli <table> count --by <field> --since 24h\` — answer distribution
+  questions in ~30 tokens without fetching rows
+- \`autocli whois <id>\` — resolve an id from a log/error to its record
+- \`autocli tables\` — every table with its relations
+- \`autocli guide\` — full usage guide, served by the binary (version-matched)
+
+## Rules
+
+- Never guess flags — on a filter error, use a combination the error lists.
+- Prefer counts over lists, filters over paging, --json only when parsing.
+${hasTodoWorkflows ? "\n## Note\n\nThe spec still contains generated seed workflows (marked todo) — see\nAUTOCLI-INTERVIEW.md in the project root to finish the CLI for this project.\n" : ""}`;
+}
+
 export function renderGuide(spec: AutocliSpec): string {
   const tableNames = Object.keys(spec.tables).sort();
   const searchable = tableNames.filter((n) => (spec.tables[n]?.search.length ?? 0) > 0);

@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 eval/faithbase-pre-cli/
+fixtures/faithbase-schema.json
+eval/ground-truth/

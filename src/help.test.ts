@@ -6,8 +6,9 @@ import { parseRawSchema } from "./introspect.js";
 import { generateSpec } from "./spec.js";
 import type { TableSpec } from "./types.js";
 
-const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/faithbase-schema.json", import.meta.url));
-const ir = parseRawSchema(readFileSync(FIXTURE_PATH, "utf8"));
+import { EMPTY_IR, hasFixture, loadFixtureIR } from "./fixture-helper.js";
+
+const ir = hasFixture ? loadFixtureIR() : EMPTY_IR;
 const spec = generateSpec(ir, { projectName: "faithbase" });
 
 function specTable(name: string): TableSpec {
@@ -16,7 +17,7 @@ function specTable(name: string): TableSpec {
   return t;
 }
 
-describe("renderTopHelp", () => {
+describe.skipIf(!hasFixture)("renderTopHelp", () => {
   const top = renderTopHelp(spec);
 
   it("lists every table", () => {
@@ -52,7 +53,7 @@ describe("renderTopHelp", () => {
   });
 });
 
-describe("renderTableHelp", () => {
+describe.skipIf(!hasFixture)("renderTableHelp", () => {
   it("shows enum values in the filter listing (users.role)", () => {
     const help = renderTableHelp(spec, specTable("users"));
     expect(help).toContain("owner|admin|member|viewer|prayer_team");
@@ -96,7 +97,7 @@ describe("renderTableHelp", () => {
   });
 });
 
-describe("renderTablesOverview", () => {
+describe.skipIf(!hasFixture)("renderTablesOverview", () => {
   it("counts tables and shows relation arrows", () => {
     const overview = renderTablesOverview(spec);
     expect(overview).toContain("Tables in faithbase (63):");
